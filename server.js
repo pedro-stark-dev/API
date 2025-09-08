@@ -241,6 +241,9 @@ app.post('/produtos/remove', autenticarJWT, async (req, res) => {
       return res.status(400).json({ erro: 'ID é obrigatório.' });
     }
 
+    // Deleta itens de venda vinculados ao produto
+    await conn.query('DELETE FROM itens_venda WHERE produto_id = ?', [id]);
+
     // Deleta constituintes ligados às receitas do produto
     await conn.query(`
       DELETE c FROM constituintes c
