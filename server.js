@@ -717,6 +717,19 @@ app.post('/vendas/periodo', async (req, res) => {
     res.status(500).json({ erro: 'Erro interno no servidor.' });
   }
 });
+app.post('/vendas/delete', autenticarJWT, async (req, res) => {
+  try {
+    const { id } = req.body;
+    const [result] = await pool.query('DELETE FROM historico_vendas WHERE id = ?', [id]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ erro: 'Venda nao encontrada.' });
+    }
+    res.json({ mensagem: 'Venda excluida com sucesso.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ erro: 'Erro ao excluir venda.' });
+  }
+});
 
 // Buscar máquinas
 app.get('/maquinas', autenticarJWT, async (req, res) => {
@@ -1101,94 +1114,110 @@ app.post('/ficha_corte/add', autenticarJWT, async (req, res) => {
       maquina,
       turno,
       sacola_dim,
+      bobina,
       total,
       aparas,
       obs,
-      id // ID do produto
+      produto_id,
+      bobina_id
     } = req.body;
 
-    // Validação de campos obrigatórios
-    if (!operador_nome || !operador_cpf || !sacola_dim || !total || !turno || !id) {
+    if (!operador_nome || !operador_cpf || !sacola_dim || !total || !turno || !produto_id) {
       return res.status(400).json({ erro: 'Campos obrigatórios não preenchidos.' });
     }
 
-    // Conversão segura
     const totalNum = parseFloat(total);
     const aparasNum = aparas !== undefined && aparas !== '' ? parseFloat(aparas) : null;
-    const idNum = parseInt(id);
+    const produtoIdNum = parseInt(produto_id);
+    const bobinaIdNum = bobina_id ? parseInt(bobina_id) : null;
 
     if (isNaN(totalNum) || totalNum <= 0) {
       return res.status(400).json({ erro: 'O total deve ser um número válido e maior que zero.' });
     }
 
-    if (isNaN(idNum) || idNum <= 0) {
+    if (isNaN(produtoIdNum) || produtoIdNum <= 0) {
       return res.status(400).json({ erro: 'ID do produto inválido.' });
     }
 
     await connection.beginTransaction();
 
-    // Inserir a ficha de corte
+    // Inserir ficha de corte
     const [result] = await connection.query(
       `INSERT INTO corte_ficha 
-        (operador_nome, operador_cpf, maquina, turno, sacola_dim, total, aparas, obs, preenchido_em)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        (operador_nome, operador_cpf, maquina, turno, sacola_dim, bobina, bobina_id, total, aparas, obs, preenchido_em)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
       [
         operador_nome,
         operador_cpf,
         maquina,
         turno,
         sacola_dim,
+        bobina || null,
+        bobinaIdNum,
         totalNum,
         aparasNum,
         obs || null
       ]
     );
 
-    // Verificar se o produto existe antes de atualizar
-    const [produto] = await connection.query(
-      `SELECT id FROM produtos WHERE id = ?`,
-      [idNum]
-    );
-
+    // Atualizar quantidade do produto (saida pronta)
+    const [produto] = await connection.query(`SELECT id FROM produtos WHERE id = ?`, [produtoIdNum]);
     if (produto.length === 0) {
       await connection.rollback();
       return res.status(404).json({ erro: 'Produto não encontrado para atualizar estoque.' });
     }
 
-    // Atualizar quantidade no estoque
     await connection.query(
-      `UPDATE produtos 
-       SET quantidade = quantidade + ? 
-       WHERE id = ?`,
-      [totalNum, idNum]
+      `UPDATE produtos SET quantidade = quantidade + ? WHERE id = ?`,
+      [totalNum, produtoIdNum]
     );
+
+    // Atualizar aparas
     if (aparasNum && aparasNum > 0) {
       const [aparasProduto] = await connection.query(
         `SELECT id FROM produtos WHERE nome = 'Aparas' LIMIT 1`
       );
-
       if (aparasProduto.length > 0) {
         const aparasId = aparasProduto[0].id;
-
         await connection.query(
-          `UPDATE produtos 
-       SET quantidade = quantidade + ?, data_atualizada = NOW()
-       WHERE id = ?`,
+          `UPDATE produtos SET quantidade = quantidade + ?, data_atualizada = NOW() WHERE id = ?`,
           [aparasNum, aparasId]
         );
-      } else {
-        // Apenas loga e continua — não interrompe a transação
-        console.warn('Produto "Aparas" não encontrado. Atualização de aparas ignorada.');
       }
     }
+
+    // Verificar se a bobina tem estoque suficiente
+    if (bobinaIdNum) {
+      const [bobinaProduto] = await connection.query(
+        `SELECT quantidade FROM produtos WHERE id = ?`,
+        [bobinaIdNum]
+      );
+
+      if (bobinaProduto.length === 0) {
+        await connection.rollback();
+        return res.status(404).json({ erro: 'Bobina não encontrada.' });
+      }
+
+      if (bobinaProduto[0].quantidade < totalNum) {
+        await connection.rollback();
+        return res.status(400).json({ erro: 'Quantidade da bobina insuficiente.' });
+      }
+
+      // Atualizar estoque da bobina
+      await connection.query(
+        `UPDATE produtos SET quantidade = quantidade - ? WHERE id = ?`,
+        [totalNum, bobinaIdNum]
+      );
+    }
+
     // Inserir no histórico de entrada
     await connection.query(
       `INSERT INTO historico_entrada 
         (produto_id, quantidade, data_entrada, nome, operador, maquina, aparas)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [idNum, totalNum, new Date(), sacola_dim, operador_nome.trim(), maquina.trim(), aparasNum]
+      [produtoIdNum, totalNum, new Date(), sacola_dim, operador_nome.trim(), maquina.trim(), aparasNum]
     );
-    // Inserir registro no histórico de entrada
+
     await connection.commit();
 
     res.status(201).json({
@@ -1198,14 +1227,12 @@ app.post('/ficha_corte/add', autenticarJWT, async (req, res) => {
 
   } catch (err) {
     await connection.rollback();
-
     console.error('Erro ao adicionar ficha de corte:', {
       erro: err.message,
       stack: err.stack,
       body: req.body,
       timestamp: new Date().toISOString()
     });
-
     res.status(500).json({
       erro: 'Erro ao adicionar ficha de corte.',
       detalhes: process.env.NODE_ENV === 'development' ? err.message : null
@@ -1214,6 +1241,9 @@ app.post('/ficha_corte/add', autenticarJWT, async (req, res) => {
     connection.release();
   }
 });
+
+
+
 
 
 
