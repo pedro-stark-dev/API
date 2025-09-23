@@ -739,17 +739,28 @@ app.get('/maquinas', autenticarJWT, async (req, res) => {
     const params = [];
 
     if (search) {
-      query += ' WHERE nome LIKE ? LIMIT 10';
-      params.push(`%${search}%`);
+      query += ` 
+        WHERE nome LIKE ? 
+        OR tipo LIKE ? 
+        OR modelo LIKE ? 
+        OR n_s LIKE ? 
+        OR fabricante LIKE ? 
+        OR fabricante_contato LIKE ?
+        LIMIT 10`;
+      
+      for (let i = 0; i < 6; i++) {
+        params.push(`%${search}%`);
+      }
     }
 
     const [maquinas] = await pool.query(query, params);
     res.json(maquinas);
   } catch (err) {
-    console.error(err);
+    console.error('Erro ao buscar máquinas:', err);
     res.status(500).json({ erro: 'Erro ao buscar máquinas.' });
   }
 });
+
 app.get('/maquinas/:id', autenticarJWT, async (req, res) => {
   try {
     const { id } = req.params;
@@ -769,15 +780,15 @@ app.get('/maquinas/:id', autenticarJWT, async (req, res) => {
 // Adicionar máquina
 app.post('/maquinas/add', autenticarJWT, async (req, res) => {
   try {
-    const { nome } = req.body;
+    const { nome , tipo, modelo, fabricante, fabricante_contato, s_numero} = req.body;
 
-    if (!nome) {
+    if (!nome || !tipo) {
       return res.status(400).json({ erro: 'O nome da máquina é obrigatório.' });
     }
 
     const [result] = await pool.query(
-      'INSERT INTO maquinas (nome) VALUES (?)',
-      [nome]
+      'INSERT INTO maquinas (nome, tipo, modelo, fabricante, fabricante_contato, n_s) VALUES (?,?,?,?,?,?)',
+      [nome, tipo, modelo || null, fabricante || null, fabricante_contato  || null, s_numero || null]
     );
 
     res.status(201).json({ mensagem: 'Máquina adicionada com sucesso.', maquinaId: result.insertId });
@@ -790,15 +801,19 @@ app.post('/maquinas/add', autenticarJWT, async (req, res) => {
 //editar máquina
 app.post('/maquinas/edit', autenticarJWT, async (req, res) => {
   try {
-    const { id, nome } = req.body;
+    const { id, nome, tipo, modelo, fabricante, fabricante_contato, s_numero } = req.body;
 
-    if (!id || !nome) {
-      return res.status(400).json({ erro: 'ID e nome são obrigatórios.' });
+    if (!id || !nome || !tipo ) {
+      return res.status(400).json({ erro: 'Informações obrigatórias faltando.' });
     }
-
+    if (tipo !== 'Extrusora' && tipo !== 'Injetora' && tipo !== 'Cortadora' && tipo !== 'Acabamento' && tipo !== 'Outros') {
+      return res.status(400).json({ erro: 'Tipo inválido. Deve ser Extrusora, Injetora, Cortadora, Acabamento ou Outros.' });
+    }
     const [result] = await pool.query(
-      'UPDATE maquinas SET nome = ? WHERE id = ?',
-      [nome, id]
+      `UPDATE maquinas 
+       SET nome = ?, tipo = ?, modelo = ?, fabricante = ?, fabricante_contato = ?, n_s = ? 
+       WHERE id = ?`,
+      [nome, tipo, modelo, fabricante, fabricante_contato, s_numero, id]
     );
 
     if (result.affectedRows === 0) {
@@ -807,10 +822,11 @@ app.post('/maquinas/edit', autenticarJWT, async (req, res) => {
 
     res.json({ mensagem: 'Máquina atualizada com sucesso.' });
   } catch (err) {
-    console.error(err);
+    console.error('Erro ao atualizar máquina:', err);
     res.status(500).json({ erro: 'Erro ao atualizar máquina.' });
   }
 });
+
 //remover maquina
 app.post('/maquinas/remove', autenticarJWT, async (req, res) => {
   try {
@@ -1175,7 +1191,7 @@ app.post('/ficha_corte/add', autenticarJWT, async (req, res) => {
     // Atualizar aparas
     if (aparasNum && aparasNum > 0) {
       const [aparasProduto] = await connection.query(
-        `SELECT id FROM produtos WHERE nome = 'Aparas' LIMIT 1`
+        `SELECT id FROM produtos WHERE tipo = 'Sobras' LIMIT 10`
       );
       if (aparasProduto.length > 0) {
         const aparasId = aparasProduto[0].id;
